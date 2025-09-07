@@ -303,4 +303,95 @@ class GetTreasuryYieldDataView(BaseMarketDataView):
         except Exception as e:
             logger.error(f"Error retrieving 10-Year Treasury Yield data: {str(e)}")
             return self.format_response("error", str(e))
-        
+
+# ---------------------------
+# NEW: Overnight Gap Views
+# ---------------------------
+
+class CollectOvernightGapView(BaseMarketDataView):
+    def get(self, request):
+        try:
+            logger.info(f"Collecting Overnight Gaps for NQ from {self.start_date} to {self.end_date}")
+            
+            ticker = "NQ=F"
+            instrument = yf.Ticker(ticker)
+            data = instrument.history(start=self.start_date, end=self.end_date, interval="1d")
+            
+            if data.empty:
+                return self.format_response("error", f"No data retrieved for {ticker}")
+
+            successful_inserts = 0
+            prev_close = None
+
+            for date, row in data.iterrows():
+                if prev_close is not None:
+                    # Gap = today's open – yesterday's close
+                    gap_points = row["Open"] - prev_close
+                    gap_percent = (gap_points / prev_close) * 100 if prev_close != 0 else None
+
+                    ts = self.convert_timestamp(date)
+
+                    ok1 = self.store_metric(
+                        timestamp=ts,
+                        metric_name="overnight_gap_points",
+                        metric_value=gap_points,
+                        source=f"Yahoo Finance ({ticker})"
+                    )
+                    ok2 = self.store_metric(
+                        timestamp=ts,
+                        metric_name="overnight_gap_percent",
+                        metric_value=gap_percent,
+                        source=f"Yahoo Finance ({ticker})"
+                    )
+
+                    if ok1 and ok2:
+                        successful_inserts += 1
+
+                prev_close = row["Close"]
+
+            return self.format_response(
+                "success",
+                f"Collected Overnight Gaps for {successful_inserts} days in January 2024",
+                {
+                    "ticker_used": ticker,
+                    "records_processed": successful_inserts,
+                    "expected_trading_days": self.expected_trading_days,
+                    "source": "Yahoo Finance"
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Error collecting Overnight Gaps: {str(e)}")
+            return self.format_response("error", str(e))
+
+class GetOvernightGapDataView(BaseMarketDataView):
+    def get(self, request):
+        try:
+            start_date = datetime(2024, 1, 1)
+            end_date = datetime(2024, 2, 1)
+
+            gap_data = MarketMetrics.objects.filter(
+                metric_name__in=['overnight_gap_points', 'overnight_gap_percent'],
+                timestamp__date__gte=start_date,
+                timestamp__date__lt=end_date
+            ).order_by('timestamp')
+
+            results = {}
+            for entry in gap_data:
+                date_str = entry.timestamp.strftime("%Y-%m-%d")
+                if date_str not in results:
+                    results[date_str] = {"date": date_str, "timestamp": entry.timestamp.isoformat()}
+                if entry.metric_name == "overnight_gap_points":
+                    results[date_str]["gap_points"] = float(entry.metric_value)
+                elif entry.metric_name == "overnight_gap_percent":
+                    results[date_str]["gap_percent"] = float(entry.metric_value)
+
+            return JsonResponse({
+                "status": "success",
+                "count": len(results),
+                "data": list(results.values())
+            })
+
+        except Exception as e:
+            logger.error(f"Error retrieving Overnight Gap data: {str(e)}")
+            return self.format_response("error", str(e))
