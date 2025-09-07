@@ -156,3 +156,139 @@ class GetNQDataView(View):
                 "message": str(e)
             }, status=500)
         
+@method_decorator(csrf_exempt, name='dispatch')
+class CollectVIXLevelView(View):
+    def get(self, request):
+        try:
+            start_date = "2024-01-01"
+            end_date = "2024-01-31"
+            
+            logger.info(f"Collecting VIX levels from {start_date} to {end_date}")
+
+            # VIX ticker
+            ticker = "^VIX"
+            try:
+                logger.info(f"Trying ticker: {ticker}")
+                instrument = yf.Ticker(ticker)
+                data = instrument.history(start=start_date, end=end_date, interval="1d")
+                
+                if data.empty:
+                    logger.error(f"Empty data for {ticker}")
+                    return JsonResponse({
+                        "status": "error", 
+                        "message": f"No data retrieved for {ticker}"
+                    }, status=500)
+                
+                logger.info(f"Successfully retrieved {len(data)} records for {ticker}")
+                
+            except Exception as e:
+                logger.error(f"Failed to retrieve data for {ticker}: {str(e)}")
+                return JsonResponse({
+                    "status": "error", 
+                    "message": f"Failed to retrieve data for {ticker}: {str(e)}"
+                }, status=500)
+
+            # Set up timezone
+            eastern_tz = pytz_timezone('US/Eastern')
+            
+            # Count successful inserts
+            successful_inserts = 0
+            
+            # Process each day's closing price
+            for date, row in data.iterrows():
+                try:
+                    # Handle timezone conversion
+                    timestamp = pd.Timestamp(date)
+                    
+                    # Convert to timezone-naive datetime in US/Eastern time
+                    if timestamp.tzinfo is not None:
+                        eastern_time = timestamp.tz_convert(eastern_tz)
+                        naive_datetime = eastern_time.replace(tzinfo=None)
+                    else:
+                        utc_time = timestamp.tz_localize("UTC")
+                        eastern_time = utc_time.tz_convert(eastern_tz)
+                        naive_datetime = eastern_time.replace(tzinfo=None)
+                    
+                    # Create timezone-aware datetime for Django
+                    django_timestamp = timezone.make_aware(naive_datetime, eastern_tz)
+                    
+                    # Extract the VIX closing level
+                    vix_level = float(row["Close"])
+                    
+                    # Store in MarketMetrics model
+                    MarketMetrics.objects.update_or_create(
+                        timestamp=django_timestamp,
+                        metric_name="vix_level",
+                        defaults={
+                            "metric_value": vix_level,
+                            "data_type": "eod",
+                            "source": f"Yahoo Finance ({ticker})",
+                        }
+                    )
+                    
+                    successful_inserts += 1
+                    logger.info(f"Stored VIX level {vix_level} for {django_timestamp.date()}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing data for {date}: {str(e)}")
+                    continue
+
+            # Expected trading days in January 2024 (excluding holidays)
+            expected_trading_days = 22  # Jan 1 (New Year's) and Jan 15 (MLK Day) are holidays
+            
+            return JsonResponse({
+                "status": "success",
+                "message": f"Collected VIX levels for {successful_inserts} days in January 2024",
+                "details": {
+                    "ticker_used": ticker,
+                    "records_processed": successful_inserts,
+                    "expected_trading_days": expected_trading_days,
+                    "source": "Yahoo Finance"
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Error collecting VIX levels: {str(e)}")
+            return JsonResponse({
+                "status": "error", 
+                "message": str(e)
+            }, status=500)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class GetVIXDataView(View):
+    def get(self, request):
+        try:
+            # Define the date range for January 2024
+            start_date = datetime(2024, 1, 1)
+            end_date = datetime(2024, 2, 1)
+            
+            # Query VIX levels
+            vix_data = MarketMetrics.objects.filter(
+                metric_name='vix_level',
+                timestamp__date__gte=start_date,
+                timestamp__date__lt=end_date
+            ).order_by('timestamp')
+            
+            # Format response
+            results = []
+            for entry in vix_data:
+                results.append({
+                    "date": entry.timestamp.strftime("%Y-%m-%d"),
+                    "timestamp": entry.timestamp.isoformat(),
+                    "vix_level": float(entry.metric_value),
+                    "source": entry.source
+                })
+            
+            return JsonResponse({
+                "status": "success",
+                "count": len(results),
+                "data": results
+            })
+            
+        except Exception as e:
+            logger.error(f"Error retrieving VIX data: {str(e)}")
+            return JsonResponse({
+                "status": "error", 
+                "message": str(e)
+            }, status=500)
+              
