@@ -1,72 +1,158 @@
 import yfinance as yf
 from django.http import JsonResponse
 from django.views import View
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from .models import MarketMetrics
 import logging
 import pandas as pd
 from django.utils import timezone
+from pytz import timezone as pytz_timezone
+from datetime import datetime
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
+@method_decorator(csrf_exempt, name='dispatch')
 class CollectNQCloseView(View):
     def get(self, request):
         try:
-            # Define the date range for January 2024
             start_date = "2024-01-01"
             end_date = "2024-01-31"
+            
+            logger.info(f"Collecting NQ closing prices from {start_date} to {end_date}")
 
-            # Try primary ticker: ^NDXFUTER (Nasdaq 100 Futures Index)
-            tickers = ["^NDXFUTER", "NQ=F"]  # Fallback to NQ=F if needed
+            # Try multiple tickers for robustness
+            tickers = ["NQ=F", "^NDX", "QQQ"]  # Futures, Index, ETF
             data = None
+            successful_ticker = None
 
             for ticker in tickers:
                 try:
-                    nq_futures = yf.Ticker(ticker)
-                    data = nq_futures.history(start=start_date, end=end_date, interval="1d")
+                    logger.info(f"Trying ticker: {ticker}")
+                    instrument = yf.Ticker(ticker)
+                    data = instrument.history(start=start_date, end=end_date, interval="1d")
+                    
                     if not data.empty:
-                        logger.info(f"Successfully retrieved data for {ticker}")
+                        successful_ticker = ticker
+                        logger.info(f"Successfully retrieved {len(data)} records for {ticker}")
                         break
+                    else:
+                        logger.warning(f"Empty data for {ticker}")
+                        
                 except Exception as e:
                     logger.warning(f"Failed to retrieve data for {ticker}: {str(e)}")
                     continue
 
             if data is None or data.empty:
                 logger.error("No data retrieved from Yahoo Finance for any ticker")
-                return JsonResponse({"status": "error", "message": "No data retrieved from Yahoo Finance"}, status=500)
+                return JsonResponse({
+                    "status": "error", 
+                    "message": "No data retrieved from Yahoo Finance for any ticker symbol"
+                }, status=500)
 
+            # Set up timezone
+            eastern_tz = pytz_timezone('US/Eastern')
+            
+            # Count successful inserts
+            successful_inserts = 0
+            
             # Process each day's closing price
             for date, row in data.iterrows():
-                # Handle timezone conversion
-                timestamp = pd.Timestamp(date)
-                if timestamp.tzinfo is None:
-                    # If naive, localize to UTC (yfinance default) then convert to US/Eastern
-                    timestamp = timestamp.tz_localize("UTC").tz_convert("US/Eastern")
-                else:
-                    # If already timezone-aware, convert to US/Eastern
-                    timestamp = timestamp.tz_convert("US/Eastern")
+                try:
+                    # Handle timezone conversion - FIXED
+                    timestamp = pd.Timestamp(date)
+                    
+                    # Convert to timezone-naive datetime in US/Eastern time
+                    if timestamp.tzinfo is not None:
+                        # If timezone-aware, convert to US/Eastern and make naive
+                        eastern_time = timestamp.tz_convert(eastern_tz)
+                        naive_datetime = eastern_time.replace(tzinfo=None)
+                    else:
+                        # If naive, assume UTC and convert to US/Eastern
+                        utc_time = timestamp.tz_localize("UTC")
+                        eastern_time = utc_time.tz_convert(eastern_tz)
+                        naive_datetime = eastern_time.replace(tzinfo=None)
+                    
+                    # Create timezone-aware datetime for Django
+                    django_timestamp = timezone.make_aware(naive_datetime, eastern_tz)
+                    
+                    # Extract the closing price
+                    close_price = float(row["Close"])
+                    
+                    # Store in MarketMetrics model
+                    MarketMetrics.objects.update_or_create(
+                        timestamp=django_timestamp,
+                        metric_name="nq_close",
+                        defaults={
+                            "metric_value": close_price,
+                            "data_type": "eod",  # End of day data
+                            "source": f"Yahoo Finance ({successful_ticker})",
+                        }
+                    )
+                    
+                    successful_inserts += 1
+                    logger.info(f"Stored NQ close price {close_price} for {django_timestamp.date()}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing data for {date}: {str(e)}")
+                    continue
 
-                # Extract the adjusted close price
-                close_price = float(row["Close"])
-
-                # Store in MarketMetrics model
-                MarketMetrics.objects.update_or_create(
-                    timestamp=timestamp,
-                    metric_name="nq_close",
-                    defaults={
-                        "metric_value": close_price,
-                        "data_type": "premarket",
-                        "source": f"Yahoo Finance ({ticker})",
-                        "created_at": timezone.now(),
-                    }
-                )
-                logger.info(f"Stored NQ close price {close_price} for {timestamp.date()}")
-
+            # Expected trading days in January 2024 (excluding holidays)
+            expected_trading_days = 22  # Jan 1 (NY) and Jan 15 (MLK) are holidays
+            
             return JsonResponse({
                 "status": "success",
-                "message": f"Collected NQ closing prices for {len(data)} days in January 2024"
+                "message": f"Collected NQ closing prices for {successful_inserts} days in January 2024",
+                "details": {
+                    "ticker_used": successful_ticker,
+                    "records_processed": successful_inserts,
+                    "expected_trading_days": expected_trading_days,
+                    "source": "Yahoo Finance"
+                }
             })
 
         except Exception as e:
             logger.error(f"Error collecting NQ closing prices: {str(e)}")
-            return JsonResponse({"status": "error", "message": str(e)}, status=500)
+            return JsonResponse({
+                "status": "error", 
+                "message": str(e)
+            }, status=500)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class GetNQDataView(View):
+    def get(self, request):
+        try:
+            # Define the date range for January 2024
+            start_date = datetime(2024, 1, 1)
+            end_date = datetime(2024, 2, 1)
+            
+            # Query NQ closing prices
+            nq_data = MarketMetrics.objects.filter(
+                metric_name='nq_close',
+                timestamp__date__gte=start_date,
+                timestamp__date__lt=end_date
+            ).order_by('timestamp')
+            
+            # Format response
+            results = []
+            for entry in nq_data:
+                results.append({
+                    "date": entry.timestamp.strftime("%Y-%m-%d"),
+                    "timestamp": entry.timestamp.isoformat(),
+                    "close_price": float(entry.metric_value),
+                    "source": entry.source
+                })
+            
+            return JsonResponse({
+                "status": "success",
+                "count": len(results),
+                "data": results
+            })
+            
+        except Exception as e:
+            logger.error(f"Error retrieving NQ data: {str(e)}")
+            return JsonResponse({
+                "status": "error", 
+                "message": str(e)
+            }, status=500)
+        

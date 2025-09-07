@@ -14,11 +14,13 @@ class MarketMetrics(models.Model):
             models.Index(fields=['metric_name', '-timestamp']),
         ]
 
+    def __str__(self):
+        return f"{self.metric_name} - {self.timestamp}"
 
 class DailySnapshots(models.Model):
     date = models.DateField(primary_key=True)
     snapshot_time = models.DateTimeField()
-    metrics = models.JSONField()  # ✅ works as JSONB in Postgres, text in SQLite
+    metrics = models.JSONField()
     is_complete = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -26,3 +28,6 @@ class DailySnapshots(models.Model):
         indexes = [
             models.Index(fields=['-date'], name='idx_daily_date'),
         ]
+
+    def __str__(self):
+        return f"Snapshot - {self.date}"
