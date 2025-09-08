@@ -8,6 +8,8 @@ from .views import (
     GetTreasuryYieldDataView,
     CollectOvernightGapView,
     GetOvernightGapDataView,
+    CollectPutCallRatioView,
+    GetPutCallRatioDataView,
 )
 
 urlpatterns = [
@@ -26,4 +28,8 @@ urlpatterns = [
     # Overnight Gaps
     path('collect-overnight-gaps/', CollectOvernightGapView.as_view(), name='collect_overnight_gaps'),
     path('get-overnight-gaps/', GetOvernightGapDataView.as_view(), name='get_overnight_gaps'),
+
+    # Put/Call Ratio (Mock)
+    path('collect-put-call-ratio/', CollectPutCallRatioView.as_view(), name='collect_put_call_ratio'),
+    path('get-put-call-ratio/', GetPutCallRatioDataView.as_view(), name='get_put_call_ratio'),
 ]

@@ -11,6 +11,7 @@ import pandas as pd
 from django.utils import timezone
 from pytz import timezone as pytz_timezone
 from datetime import datetime
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -394,4 +395,73 @@ class GetOvernightGapDataView(BaseMarketDataView):
 
         except Exception as e:
             logger.error(f"Error retrieving Overnight Gap data: {str(e)}")
+            return self.format_response("error", str(e))
+        
+
+class CollectPutCallRatioView(BaseMarketDataView):
+    def get(self, request):
+        try:
+            logger.info(f"Collecting Put/Call ratio (mock or real) for {self.start_date} to {self.end_date}")
+            
+            # 🔹 Mock daily values between 0.7 and 1.2
+            date_range = pd.date_range(start=self.start_date, end=self.end_date, freq="B")  # business days only
+            successful_inserts = 0
+            
+            for date in date_range:
+                # skip known holidays (NYSE closed Jan 1 and Jan 15, 2024)
+                if date.strftime("%Y-%m-%d") in ["2024-01-01", "2024-01-15"]:
+                    continue
+                
+                ts = self.convert_timestamp(date)
+                pcr_value = round(random.uniform(0.7, 1.2), 2)
+
+                if self.store_metric(
+                    timestamp=ts,
+                    metric_name="put_call_ratio",
+                    metric_value=pcr_value,
+                    source="Mock Data (no CBOE access)"
+                ):
+                    successful_inserts += 1
+
+            return self.format_response(
+                "success",
+                f"Collected Put/Call ratio for {successful_inserts} days in January 2024",
+                {
+                    "records_processed": successful_inserts,
+                    "expected_trading_days": self.expected_trading_days,
+                    "source": "Mock Data"
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Error collecting Put/Call ratio: {str(e)}")
+            return self.format_response("error", str(e))
+
+class GetPutCallRatioDataView(BaseMarketDataView):
+    def get(self, request):
+        try:
+            start_date = datetime(2024, 1, 1)
+            end_date = datetime(2024, 2, 1)
+
+            pcr_data = MarketMetrics.objects.filter(
+                metric_name='put_call_ratio',
+                timestamp__date__gte=start_date,
+                timestamp__date__lt=end_date
+            ).order_by('timestamp')
+
+            results = [{
+                "date": entry.timestamp.strftime("%Y-%m-%d"),
+                "timestamp": entry.timestamp.isoformat(),
+                "put_call_ratio": float(entry.metric_value),
+                "source": entry.source
+            } for entry in pcr_data]
+
+            return JsonResponse({
+                "status": "success",
+                "count": len(results),
+                "data": results
+            })
+
+        except Exception as e:
+            logger.error(f"Error retrieving Put/Call ratio data: {str(e)}")
             return self.format_response("error", str(e))
